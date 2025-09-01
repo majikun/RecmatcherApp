@@ -305,7 +305,8 @@ struct SegmentRowView: View {
                 }
                 Spacer()
                 if let mo = row.matched_orig_seg {
-                    Text("seg \(mo.seg_id) S\(mo.scene_id)/idx \(mo.scene_seg_idx ?? -1)").foregroundStyle(.secondary)
+                    Text("seg \(mo.seg_id ?? -1) S\(mo.scene_id ?? -1)/idx \(mo.scene_seg_idx ?? -1)")
+                        .foregroundStyle(.secondary)
                 } else {
                     Text("-").foregroundStyle(.secondary)
                 }
@@ -327,7 +328,7 @@ struct CandidateRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("seg \(c.seg_id) S\(c.scene_id)/idx \(c.scene_seg_idx ?? -1)")
+                Text("seg \(c.seg_id ?? -1) S\(c.scene_id ?? -1)/idx \(c.scene_seg_idx ?? -1)")
                     .fontWeight(isSelected ? .bold : .regular)
                 Spacer()
                 Text((c.score ?? 0).formatted(.number.precision(.fractionLength(3))))
