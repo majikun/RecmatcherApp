@@ -47,6 +47,19 @@ struct MainView: View {
         }
     }
 
+    // Pick a local directory and pass its URL back (for project root)
+    private func pickLocalDirectory(_ title: String = "选择目录…", _ onPick: (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            onPick(url)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -201,9 +214,26 @@ struct MainView: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            TextField("project root", text: $store.projectRoot).textFieldStyle(.roundedBorder).frame(width: 340)
-            TextField("movie.mp4 (local path, optional)", text: $store.moviePath).textFieldStyle(.roundedBorder).frame(width: 320)
-            TextField("clip.mp4 (local path, optional)", text: $store.clipPath).textFieldStyle(.roundedBorder).frame(width: 320)
+            HStack(spacing: 6) {
+                TextField("project root", text: $store.projectRoot)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 340)
+                Button("选择项目…") {
+                    pickLocalDirectory("选择项目根目录…") { url in
+                        store.projectRoot = url.path
+                        Task {
+                            await store.openProject()            // 仅传 project.root，由后端返回 clip/movie
+                            await store.loadEverythingAfterOpen() // 回填文本框并加载视频
+                        }
+                    }
+                }
+            }
+            TextField("movie.mp4 (local path, optional)", text: $store.moviePath)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+            TextField("clip.mp4 (local path, optional)", text: $store.clipPath)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
             Button("授权Movie…") {
                 store.authorizeMovieFile()
                 Task { await store.openProject() }
@@ -212,7 +242,12 @@ struct MainView: View {
                 store.authorizeClipFile()
                 Task { await store.openProject() }
             }
-            Button("打开") { Task { await store.openProject() } }
+            Button("打开") {
+                Task {
+                    await store.openProject()            // 仅使用 project.root；由后端返回 clip/movie
+                    await store.loadEverythingAfterOpen() // 回填并加载
+                }
+            }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
             Button("刷新状态") { Task { await store.refreshReviewStates() } }
             Spacer()

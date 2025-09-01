@@ -260,9 +260,11 @@ actor APIClient {
 
     // API: open project
     struct OpenProjectBody: Encodable { let root: String; let movie: String?; let clip: String? }
-    func openProject(root: String, movie: String?, clip: String?) async throws {
-        struct R: Decodable { let ok: Bool }
-        let _: R = try await post("/project/open", body: OpenProjectBody(root: root, movie: movie, clip: clip))
+    struct OpenProjectResp: Decodable { let ok: Bool; let root: String?; let movie: String?; let clip: String? }
+    func openProject(root: String, movie: String?, clip: String?) async throws -> OpenProjectResp {
+        let resp: OpenProjectResp = try await post("/project/open", body: OpenProjectBody(root: root, movie: movie, clip: clip))
+        print("[api] /project/open resp ok=\(resp.ok) root=\(resp.root ?? "-") movie=\(resp.movie ?? "-") clip=\(resp.clip ?? "-")")
+        return resp
     }
 
     // API: scenes
@@ -383,7 +385,13 @@ final class AppStore: ObservableObject {
 
     func openProject() async {
         do {
-            try await api.openProject(root: projectRoot, movie: moviePath.isEmpty ? nil : moviePath, clip: clipPath.isEmpty ? nil : clipPath)
+            let resp = try await api.openProject(root: projectRoot,
+                                                 movie: moviePath.isEmpty ? nil : moviePath,
+                                                 clip: clipPath.isEmpty ? nil : clipPath)
+            // Backfill paths if backend provides them
+            if let mv = resp.movie, !mv.isEmpty { self.moviePath = mv }
+            if let cp = resp.clip, !cp.isEmpty { self.clipPath = cp }
+            print("[store] openProject filled movie=\(self.moviePath) clip=\(self.clipPath)")
             await loadEverythingAfterOpen()
         } catch {
             print("[store] openProject error:", error)
