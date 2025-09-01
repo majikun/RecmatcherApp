@@ -1,6 +1,7 @@
 
 import Foundation
 import AVFoundation
+import AppKit
 
 // === Config ===
 let BACKEND_BASE = URL(string: "http://127.0.0.1:8787")!
@@ -54,7 +55,77 @@ struct SegmentRow: Codable, Identifiable {
     var matched_orig_seg: Candidate?
     let matched_source: String?
     var is_override: Bool?
+    /// 校对评价（ok / needTrim / unsure / mismatch）
+    var review_status: String?
+    /// 当“生效匹配关系”变化导致现有评价失效时，置为 true（由后端 /segments 返回）
+    var review_stale: Bool?
     var id: Int { seg_id }
+}
+
+// === Security-Scoped Bookmark Helpers ===
+enum BookmarkKey: String {
+    case movie = "bookmark.movie"
+    case clip  = "bookmark.clip"
+}
+
+enum PrefKey: String {
+    case projectRoot = "pref.projectRoot"
+    case moviePath   = "pref.moviePath"   // for display only; auth uses bookmark
+    case clipPath    = "pref.clipPath"    // for display only; auth uses bookmark
+}
+
+struct BookmarkStore {
+    static func save(url: URL, key: BookmarkKey) {
+        do {
+            let data = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(data, forKey: key.rawValue)
+        } catch {
+            print("[bookmark] save error:", error)
+        }
+    }
+    static func resolve(key: BookmarkKey) -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: key.rawValue) else { return nil }
+        var stale = false
+        do {
+            let url = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale)
+            if stale {
+                // refresh the bookmark if needed
+                save(url: url, key: key)
+            }
+            return url
+        } catch {
+            print("[bookmark] resolve error:", error)
+            return nil
+        }
+    }
+    static func clear(key: BookmarkKey) {
+        UserDefaults.standard.removeObject(forKey: key.rawValue)
+    }
+}
+
+final class SecurityScope {
+    private var active: [String: URL] = [:]
+    func start(key: BookmarkKey, url: URL) {
+        if url.startAccessingSecurityScopedResource() {
+            active[key.rawValue] = url
+            print("[scope] started for", key.rawValue, url.path)
+        } else {
+            print("[scope] failed to start for", key.rawValue, url.path)
+        }
+    }
+    func stop(key: BookmarkKey) {
+        if let u = active.removeValue(forKey: key.rawValue) {
+            u.stopAccessingSecurityScopedResource()
+            print("[scope] stopped for", key.rawValue)
+        }
+    }
+    func stopAll() {
+        for (k, u) in active {
+            u.stopAccessingSecurityScopedResource()
+            print("[scope] stopped for", k)
+        }
+        active.removeAll()
+    }
 }
 
 struct OverridesResponse: Codable {
@@ -101,6 +172,38 @@ extension APIClient {
 
 // === API Client ===
 actor APIClient {
+    // API: review state
+    struct UpdateReviewBody: Encodable { let seg_id: Int; let status: String }
+    func updateReviewStatus(segId: Int, status: String) async throws {
+        struct R: Decodable { let ok: Bool? }
+        let body = UpdateReviewBody(seg_id: segId, status: status)
+        let _: R = try await post("/review/update", body: body)
+    }
+
+    // Fetch review states from backend: { ok?, segs: { "id": { status, fp? } } } or { ok?, data: { segs: ... } }
+    func reviewState() async throws -> [Int:String] {
+        struct Entry: Decodable { let status: String? }
+        struct DataWrap: Decodable { let segs: [String: Entry]? }
+        struct Resp: Decodable { let ok: Bool?; let segs: [String: Entry]?; let data: DataWrap? }
+        let resp: Resp = try await get("/review/state")
+        let segs = resp.segs ?? resp.data?.segs ?? [:]
+        return segs.reduce(into: [:]) { res, kv in
+            if let id = Int(kv.key), let s = kv.value.status { res[id] = s }
+        }
+    }
+    
+    func getRaw(_ path: String, query: [String:String] = [:]) async throws -> Data {
+        var comps = URLComponents(url: BACKEND_BASE.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty {
+            comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        print("[api] GET(raw)", comps.url!.absoluteString, "status", (resp as? HTTPURLResponse)?.statusCode ?? -1, "bytes", data.count)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return data
+    }
     func get<T: Decodable>(_ path: String, query: [String:String] = [:]) async throws -> T {
         var comps = URLComponents(url: BACKEND_BASE.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty {
@@ -173,9 +276,32 @@ actor APIClient {
 final class AppStore: ObservableObject {
     let api = APIClient()
 
-    @Published var projectRoot: String = ""
-    @Published var moviePath: String = DEFAULT_MOVIE_PATH ?? ""
-    @Published var clipPath: String  = DEFAULT_CLIP_PATH ?? ""
+    // Persisted user inputs
+    @Published var projectRoot: String = UserDefaults.standard.string(forKey: PrefKey.projectRoot.rawValue) ?? "" {
+        didSet { UserDefaults.standard.set(projectRoot, forKey: PrefKey.projectRoot.rawValue) }
+    }
+    @Published var moviePath: String = UserDefaults.standard.string(forKey: PrefKey.moviePath.rawValue) ?? (DEFAULT_MOVIE_PATH ?? "") {
+        didSet { UserDefaults.standard.set(moviePath, forKey: PrefKey.moviePath.rawValue) }
+    }
+    @Published var clipPath: String  = UserDefaults.standard.string(forKey: PrefKey.clipPath.rawValue) ?? (DEFAULT_CLIP_PATH ?? "") {
+        didSet { UserDefaults.standard.set(clipPath, forKey: PrefKey.clipPath.rawValue) }
+    }
+
+    // Security-scope handler for bookmarks
+    private let scope = SecurityScope()
+
+    init() {
+        // Restore movie bookmark if available
+        if let mu = BookmarkStore.resolve(key: .movie) {
+            scope.start(key: .movie, url: mu)
+            self.moviePath = mu.path
+        }
+        // Restore clip bookmark if available
+        if let cu = BookmarkStore.resolve(key: .clip) {
+            scope.start(key: .clip, url: cu)
+            self.clipPath = cu.path
+        }
+    }
 
     @Published var scenes: [Scene] = []
     @Published var allSegments: [SegmentRow] = []
@@ -212,6 +338,7 @@ final class AppStore: ObservableObject {
                 await select(seg: first)
             }
             try await refreshOverrides()
+            await refreshReviewStates()
         } catch {
             print("[store] loadEverything error:", error)
         }
@@ -244,7 +371,7 @@ final class AppStore: ObservableObject {
             return row
         }
     }
-
+    
     func select(seg: SegmentRow) async {
         self.selectedSeg = seg
         // movie choice
@@ -328,6 +455,73 @@ final class AppStore: ObservableObject {
             _ = await select(seg: selectedSeg!)
         } catch {
             print("[store] apply error:", error)
+        }
+    }
+    
+    /// 让用户选择“原片”并保存授权（安全书签）
+    func authorizeMovieFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedFileTypes = ["mp4", "mov", "m4v", "mkv"]
+        panel.message = "请选择电影原片文件以授权沙箱访问（将保存安全书签）"
+        if panel.runModal() == .OK, let url = panel.url {
+            scope.stop(key: .movie)
+            BookmarkStore.save(url: url, key: .movie)
+            scope.start(key: .movie, url: url)
+            self.moviePath = url.path
+        }
+    }
+
+    /// 让用户选择“短片/clip”并保存授权（安全书签）
+    func authorizeClipFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedFileTypes = ["mp4", "mov", "m4v", "mkv"]
+        panel.message = "请选择短片文件以授权沙箱访问（将保存安全书签）"
+        if panel.runModal() == .OK, let url = panel.url {
+            scope.stop(key: .clip)
+            BookmarkStore.save(url: url, key: .clip)
+            scope.start(key: .clip, url: url)
+            self.clipPath = url.path
+        }
+    }
+
+    func refreshReviewStates() async {
+        do {
+            let map = try await api.reviewState()
+            // merge into allSegments
+            self.allSegments = self.allSegments.map { row in
+                var r = row
+                if let st = map[row.seg_id] { r.review_status = st }
+                return r
+            }
+            // also update selectedSeg if visible
+            if let cur = selectedSeg, let st = map[cur.seg_id] {
+                var c = cur; c.review_status = st; selectedSeg = c
+            }
+        } catch {
+            print("[store] refreshReviewStates error:", error)
+        }
+    }
+
+    /// 更新当前选中分段的校对状态（会同步到后端）
+    func updateReviewStatus(_ status: String) async {
+        guard let seg = selectedSeg else { return }
+        do {
+            try await api.updateReviewStatus(segId: seg.seg_id, status: status)
+            if let idx = allSegments.firstIndex(where: { $0.seg_id == seg.seg_id }) {
+                var row = allSegments[idx]
+                row.review_status = status
+                row.review_stale = false
+                allSegments[idx] = row
+                selectedSeg = row
+            }
+        } catch {
+            print("[store] updateReviewStatus error:", error)
         }
     }
 }

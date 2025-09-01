@@ -134,6 +134,21 @@ struct MainView: View {
                             }
                         }
                         Spacer()
+                        // 当前校对状态展示
+                        Group {
+                            if let st = store.selectedSeg?.review_status, !st.isEmpty {
+                                Text("状态：\(st)").font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("状态：-").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        // 校对状态菜单 {"anchor", "matched", "deferred", "rejected"}
+                        Menu("校对状态") {
+                            Button("OK") { Task { await store.updateReviewStatus("ok") } }
+                            Button("Need Trim") { Task { await store.updateReviewStatus("needTrim") } }
+                            Button("Unsure") { Task { await store.updateReviewStatus("unsure") } }
+                            Button("Mismatch") { Task { await store.updateReviewStatus("mismatch") } }
+                        }
                         Button("应用所选") { applySelected() }.keyboardShortcut(.return, modifiers: [])
                     }
                     .padding(.bottom, 6)
@@ -170,21 +185,17 @@ struct MainView: View {
             TextField("project root", text: $store.projectRoot).textFieldStyle(.roundedBorder).frame(width: 340)
             TextField("movie.mp4 (local path, optional)", text: $store.moviePath).textFieldStyle(.roundedBorder).frame(width: 320)
             TextField("clip.mp4 (local path, optional)", text: $store.clipPath).textFieldStyle(.roundedBorder).frame(width: 320)
-            Button("选Movie…") {
-                pickLocalFile("选择 Movie 文件…") { url in
-                    store.moviePath = url.path
-                    // Optionally refresh immediately
-                    Task { await store.openProject() }
-                }
+            Button("授权Movie…") {
+                store.authorizeMovieFile()
+                Task { await store.openProject() }
             }
-            Button("选Clip…") {
-                pickLocalFile("选择 Clip 文件…") { url in
-                    store.clipPath = url.path
-                    Task { await store.openProject() }
-                }
+            Button("授权Clip…") {
+                store.authorizeClipFile()
+                Task { await store.openProject() }
             }
             Button("打开") { Task { await store.openProject() } }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
+            Button("刷新状态") { Task { await store.refreshReviewStates() } }
             Spacer()
             if !store.moviePath.isEmpty {
                 Text(URL(fileURLWithPath: store.moviePath).lastPathComponent)
@@ -229,12 +240,31 @@ struct SegmentRowView: View {
     let isSelected: Bool
     let hasOverride: Bool
 
+    private var statusColor: Color {
+        switch row.review_status {
+        case "ok": return .green
+        case "needTrim": return .yellow
+        case "unsure": return .orange
+        case "mismatch": return .red
+        default: return .secondary
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("#\(row.seg_id)  S\(row.clip.scene_id ?? -1)/idx \(row.clip.scene_seg_idx ?? -1)")
                     .fontWeight(isSelected ? .bold : .regular)
                 if hasOverride { Text("✓").foregroundColor(.blue) }
+                let st = (row.review_status?.isEmpty == false) ? row.review_status! : "-"
+                Group {
+                    if row.review_status?.isEmpty == false {
+                        Circle().fill(statusColor).frame(width: 8, height: 8)
+                    } else {
+                        Circle().stroke(.secondary, lineWidth: 1).frame(width: 8, height: 8)
+                    }
+                    Text(st).font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer()
                 if let mo = row.matched_orig_seg {
                     Text("seg \(mo.seg_id) S\(mo.scene_id)/idx \(mo.scene_seg_idx ?? -1)").foregroundStyle(.secondary)
