@@ -92,7 +92,12 @@ struct MainView: View {
                             applyAudioSelection()
                         }
                         Spacer()
-                        Text("循环次数: ∞ / \(maxLoops)").font(.footnote).foregroundColor(.secondary)
+                        Stepper(value: $maxLoops, in: 1...8) {
+                            Text("循环次数: \(maxLoops)")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(width: 160)
                     }
                     .padding(.bottom, 4)
 
@@ -248,7 +253,17 @@ struct MainView: View {
         let clipEnd   = seg.clip.end
         let movieStart = c.start
         let movieEnd   = c.end
-        store.pair.playPair(clipStart: clipStart, clipEnd: clipEnd, movieStart: movieStart, movieEnd: movieEnd, togetherLoop: store.loopPair, mirrorClip: store.mirrorClip, clipURL: store.clipURL(), movieURL: store.movieURL())
+        store.pair.playPair(
+            clipStart: clipStart,
+            clipEnd: clipEnd,
+            movieStart: movieStart,
+            movieEnd: movieEnd,
+            togetherLoop: store.loopPair,
+            mirrorClip: store.mirrorClip,
+            clipURL: store.clipURL(),
+            movieURL: store.movieURL(),
+            loopCount: maxLoops
+        )
     }
 
     private func applySelected() {

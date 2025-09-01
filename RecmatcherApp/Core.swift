@@ -349,6 +349,14 @@ final class AppStore: ObservableObject {
     @Published var followMovie: Bool = true
     @Published var loopPair: Bool = true
     @Published var mirrorClip: Bool = false
+    
+    private var loopTokens: [NSObjectProtocol] = []
+    private var loopsLeft: Int = 0
+
+    private func clearLoopObservers() {
+        for t in loopTokens { NotificationCenter.default.removeObserver(t) }
+        loopTokens.removeAll()
+    }
 
     // Players
     let pair = PairPlayer()
@@ -580,6 +588,8 @@ final class PairPlayer {
 
     private var clipFinished = false
     private var movieFinished = false
+    // Shared finite-loop counter: total restarts remaining for both players
+    private var restartsRemaining: Int = 0
 
     init() {
         clip.allowsExternalPlayback = false
@@ -590,7 +600,8 @@ final class PairPlayer {
                   movieStart: Double, movieEnd: Double,
                   togetherLoop: Bool,
                   mirrorClip: Bool,
-                  clipURL: URL?, movieURL: URL?) {
+                  clipURL: URL?, movieURL: URL?,
+                  loopCount: Int = 2) {
 
         self.togetherLoop = togetherLoop
         self.mirrorClip = mirrorClip
@@ -598,6 +609,8 @@ final class PairPlayer {
         self.movieRange = (movieStart, movieEnd)
         self.clipFinished = false
         self.movieFinished = false
+        // Initialize shared finite-loop counter (N plays total => N-1 restarts)
+        self.restartsRemaining = max(loopCount - 1, 0)
 
         if let cu = clipURL {
             let item = AVPlayerItem(url: cu)
@@ -625,13 +638,31 @@ final class PairPlayer {
             guard let self = self else { return }
             self.clip.pause()
             self.clipFinished = true
-            self.maybeRestartTogether()
+            if self.togetherLoop {
+                self.maybeRestartTogether()
+            } else {
+                if self.restartsRemaining > 0 {
+                    self.restartsRemaining -= 1
+                    self.clip.seek(to: CMTime(seconds: self.clipRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                    self.clip.play()
+                    self.clipFinished = false
+                }
+            }
         }
         movieBoundary = movie.addBoundaryTimeObserver(forTimes: [NSValue(time: mEnd)], queue: .main) { [weak self] in
             guard let self = self else { return }
             self.movie.pause()
             self.movieFinished = true
-            self.maybeRestartTogether()
+            if self.togetherLoop {
+                self.maybeRestartTogether()
+            } else {
+                if self.restartsRemaining > 0 {
+                    self.restartsRemaining -= 1
+                    self.movie.seek(to: CMTime(seconds: self.movieRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                    self.movie.play()
+                    self.movieFinished = false
+                }
+            }
         }
 
         clip.play()
@@ -639,27 +670,19 @@ final class PairPlayer {
     }
 
     private func maybeRestartTogether() {
-        guard togetherLoop else {
-            // Independent loop
-            if clipFinished {
-                clip.seek(to: CMTime(seconds: clipRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                clip.play()
-                clipFinished = false
-            }
-            if movieFinished {
-                movie.seek(to: CMTime(seconds: movieRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                movie.play()
-                movieFinished = false
-            }
-            return
-        }
+        guard togetherLoop else { return } // only handle shared loop here
         if clipFinished && movieFinished {
-            clip.seek(to: CMTime(seconds: clipRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-            movie.seek(to: CMTime(seconds: movieRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-            clipFinished = false
-            movieFinished = false
-            clip.play()
-            movie.play()
+            if restartsRemaining > 0 {
+                restartsRemaining -= 1
+                clip.seek(to: CMTime(seconds: clipRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                movie.seek(to: CMTime(seconds: movieRange.0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                clipFinished = false
+                movieFinished = false
+                clip.play()
+                movie.play()
+            } else {
+                // No restarts left — stop naturally
+            }
         }
     }
 }
