@@ -199,6 +199,13 @@ extension APIClient {
 
 // === API Client ===
 actor APIClient {
+    struct ExportResp: Decodable { let ok: Bool; let path: String?; let backup: String?; let count: Int? }
+    func exportMerged() async throws -> ExportResp {
+        struct Empty: Encodable {}
+        let resp: ExportResp = try await post("/export", body: Empty())
+        print("[api] /export -> ok=\(resp.ok) path=\(resp.path ?? "-") backup=\(resp.backup ?? "-") count=\(resp.count ?? -1)")
+        return resp
+    }
     // API: review state
     struct UpdateReviewBody: Encodable { let seg_id: Int; let status: String }
     func updateReviewStatus(segId: Int, status: String) async throws {
@@ -572,6 +579,27 @@ final class AppStore: ObservableObject {
             print("[store] updateReviewStatus error:", error)
         }
     }
+    
+    func exportMerged() async {
+        do {
+            let r = try await api.exportMerged()
+            print("[store] export ok path=\(r.path ?? "-") backup=\(r.backup ?? "-") count=\(r.count ?? -1)")
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = r.ok ? "导出成功" : "导出失败"
+                alert.informativeText = "导出文件: \(r.path ?? "-")\n备份文件: \(r.backup ?? "(无)")\n段落数量: \(r.count ?? -1)"
+                alert.runModal()
+            }
+        } catch {
+            print("[store] export error:", error)
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "导出失败"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
 }
 
 // === AnyEncodable helper ===
@@ -694,3 +722,4 @@ final class PairPlayer {
         }
     }
 }
+

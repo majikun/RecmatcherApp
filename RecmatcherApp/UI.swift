@@ -249,7 +249,7 @@ struct MainView: View {
                 }
             }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
-            Button("刷新状态") { Task { await store.refreshReviewStates() } }
+            Button("导出") { Task { await store.exportMerged() } }
             Spacer()
             if !store.moviePath.isEmpty {
                 Text(URL(fileURLWithPath: store.moviePath).lastPathComponent)
