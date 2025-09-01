@@ -185,6 +185,13 @@ struct MainView: View {
             // Ensure the initial audio routing matches the Picker
             applyAudioSelection()
         }
+        .onChange(of: store.selectedSeg?.seg_id ?? -1) { _, _ in
+            selectedCand = nil
+        }
+        .onChange(of: store.selectedSeg?.matched_orig_seg?.seg_id ?? -1) { _, _ in
+            // 应用覆盖后，清理蓝色选中；橙色绑定会根据新的 matched 重新计算
+            selectedCand = nil
+        }
         .padding(8)
     }
 
@@ -309,17 +316,26 @@ struct MainView: View {
 
     private func bucket(_ key: String) -> [Candidate] {
         guard let segId = store.selectedSeg?.seg_id else { return [] }
-        return store.candBucketsBySeg[segId]?[key] ?? []
+        let arr = store.candBucketsBySeg[segId]?[key] ?? []
+        if key == "corridor" { return dedupCorridor(arr) }
+        return arr
     }
 
     @ViewBuilder
     private func candColumn(title: String, items: [Candidate]) -> some View {
+        let hasSel = items.contains { sameCandidate(selectedCand, $0) }
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.subheadline).bold()
+            HStack(spacing: 6) {
+                Text(title).font(.subheadline).bold()
+                    .foregroundColor(hasSel ? .blue : .primary)
+                if hasSel { Circle().fill(Color.blue).frame(width: 6, height: 6) }
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { (i, c) in
-                        CandidateRowView(c: c, isSelected: false)
+                    ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
+                        CandidateRowView(c: c,
+                                         isSelected: sameCandidate(selectedCand, c),
+                                         isBound: isBoundCandidate(c))
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 selectedCand = c
@@ -332,31 +348,6 @@ struct MainView: View {
         }
         .frame(maxWidth: .infinity)
     }
-    
-    @ViewBuilder
-    private func candStrip(title: String, items: [Candidate]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.subheadline).bold()
-            ScrollView(.horizontal, showsIndicators: true) {
-                LazyHStack(alignment: .top, spacing: 8) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
-                        CandidateRowView(c: c, isSelected: false)
-                            .frame(width: 280)
-                            .padding(6)
-                            .background(Color.gray.opacity(0.08))
-                            .cornerRadius(6)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
-                            .onTapGesture {
-                                selectedCand = c
-                                previewCandidate(c)
-                            }
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-    }
-
 
     private func applyAudioSelection() {
         switch audioSource {
@@ -396,6 +387,37 @@ struct MainView: View {
         guard selectedCandIdx < store.candidates.count else { return }
         let cand = store.candidates[selectedCandIdx]
         Task { await store.applyCurrentCandidate(cand) }
+    }
+    
+    private func sameCandidate(_ a: Candidate?, _ b: Candidate) -> Bool {
+        guard let a = a else { return false }
+        if let asid = a.seg_id, let bsid = b.seg_id { return asid == bsid }
+        // 兜底：用时间段比较（防止 seg_id 缺失）
+        let eps = 0.001
+        return abs(a.start - b.start) < eps && abs(a.end - b.end) < eps
+    }
+
+    // Helper to deduplicate corridor candidates
+    private func dedupCorridor(_ xs: [Candidate]) -> [Candidate] {
+        var seen = Set<String>()
+        var out: [Candidate] = []
+        for c in xs {
+            let key = "\(c.seg_id ?? -1)#\(Int(c.start * 1000))#\(Int(c.end * 1000))"
+            if seen.insert(key).inserted {
+                out.append(c)
+            }
+        }
+        return out
+    }
+    
+    // Bound (orange) = candidate that matches the selected left segment's current mapping
+    private func isBoundCandidate(_ c: Candidate) -> Bool {
+        guard let seg = store.selectedSeg, let m = seg.matched_orig_seg else { return false }
+        // 优先：seg_id 相同
+        if let ms = m.seg_id, let cs = c.seg_id, ms == cs { return true }
+        // 兜底：时间段一致（小容差）
+        let eps = 0.010 // 10ms 容忍
+        return abs(m.start - c.start) <= eps && abs(m.end - c.end) <= eps
     }
 }
 
@@ -462,7 +484,7 @@ struct SegmentRowView: View {
             }
         }
         .padding(.vertical, 4)
-        .background(isSelected ? Color.blue.opacity(0.08) : Color.clear)
+        .background(isSelected ? Color.blue.opacity(0.28) : Color.clear)
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
@@ -512,6 +534,7 @@ struct ContinuityPip: View {
 struct CandidateRowView: View {
     let c: Candidate
     let isSelected: Bool
+    let isBound: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -523,8 +546,15 @@ struct CandidateRowView: View {
             Text("\(fmt(c.start)) – \(fmt(c.end))  src: \(c.source ?? "-")").font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6)
-        .background(isSelected ? Color.blue.opacity(0.08) : Color.clear)
+        .background(isSelected ? Color.blue.opacity(0.10) : Color.clear)
         .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(
+                    isSelected ? Color.blue : (isBound ? Color.orange : Color.clear),
+                    lineWidth: (isSelected || isBound) ? 2 : 0
+                )
+        )
     }
 }
 
