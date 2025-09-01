@@ -30,6 +30,7 @@ struct MainView: View {
     @EnvironmentObject var store: AppStore
     @State private var selectedCandIdx: Int = 0
     @State private var maxLoops: Int = 3 // kept for parity; AVFoundation loops continuously
+    @State private var audioSource: String = "clip" // "clip" or "movie"
 
     // Pick a local file and pass its URL back
     private func pickLocalFile(_ title: String = "选择文件…", _ onPick: (URL) -> Void) {
@@ -80,6 +81,15 @@ struct MainView: View {
                         }
                         Toggle("镜像 Clip", isOn: $store.mirrorClip).onChange(of: store.mirrorClip) { _, _ in
                             // layer transform updates via PlayerView.updateNSView
+                        }
+                        Picker("音频", selection: $audioSource) {
+                            Text("Clip").tag("clip")
+                            Text("Movie").tag("movie")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 160)
+                        .onChange(of: audioSource) { _, _ in
+                            applyAudioSelection()
                         }
                         Spacer()
                         Text("循环次数: ∞ / \(maxLoops)").font(.footnote).foregroundColor(.secondary)
@@ -172,6 +182,8 @@ struct MainView: View {
             if let first = store.allSegments.first {
                 Task { await store.select(seg: first) }
             }
+            // Ensure the initial audio routing matches the Picker
+            applyAudioSelection()
         }
         .padding(8)
     }
@@ -216,6 +228,17 @@ struct MainView: View {
         } else {
             store.pair.clip.play()
             store.pair.movie.play()
+        }
+    }
+
+    private func applyAudioSelection() {
+        switch audioSource {
+        case "movie":
+            store.pair.clip.isMuted = true
+            store.pair.movie.isMuted = false
+        default: // "clip"
+            store.pair.clip.isMuted = false
+            store.pair.movie.isMuted = true
         }
     }
 
