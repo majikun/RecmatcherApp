@@ -31,6 +31,7 @@ struct MainView: View {
     @State private var selectedCandIdx: Int = 0
     @State private var maxLoops: Int = 3 // kept for parity; AVFoundation loops continuously
     @State private var audioSource: String = "clip" // "clip" or "movie"
+    @State private var selectedCand: Candidate? = nil
 
     // Pick a local file and pass its URL back
     private func pickLocalFile(_ title: String = "选择文件…", _ onPick: (URL) -> Void) {
@@ -54,43 +55,48 @@ struct MainView: View {
                 // Left: segments
                 VStack(alignment: .leading) {
                     Text("段落列表").font(.headline).padding(.bottom, 6)
-                    List(selection: Binding(get: {
-                        store.selectedSeg?.seg_id
-                    }, set: { _ in })) {
-                        ForEach(store.allSegments) { s in
-                            SegmentRowView(row: s, isSelected: store.selectedSeg?.seg_id == s.seg_id, hasOverride: s.is_override == true)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    Task { await store.select(seg: s) }
-                                }
+                    // Annotate segments with continuity info for left list
+                    let annotated = annotateSegments(store.allSegments)
+                    List {
+                        ForEach(annotated, id: \.row.seg_id) { item in
+                            let s = item.row
+                            SegmentRowView(
+                                row: s,
+                                isSelected: store.selectedSeg?.seg_id == s.seg_id,
+                                hasOverride: s.is_override == true,
+                                fromPrev: item.fromPrev,
+                                toNext: item.toNext,
+                                islandColor: item.spike ? .pink : islandColorFor(item.islandId),
+                                isSpike: item.spike
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture { Task { await store.select(seg: s) } }
                         }
                     }
+                    .listStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .scrollContentBackground(.hidden)
                 }
-                .frame(minWidth: 340)
+                .frame(minWidth: 280, maxWidth: 350)
 
-                // Middle: dual players
-                VStack(spacing: 8) {
+                // Right pane: controls + side-by-side players + timeline + 4-column candidates
+                VStack(alignment: .leading, spacing: 8) {
+                    // Controls row
                     HStack {
                         Button(action: togglePlayPause) {
                             Text(isPlaying ? "⏸️ 暂停" : "▶️ 播放")
                         }
-                        Toggle("同步循环", isOn: $store.loopPair).onChange(of: store.loopPair) { _, newVal in
-                            if let seg = store.selectedSeg {
-                                Task { await store.select(seg: seg) }
-                            }
+                        Toggle("同步循环", isOn: $store.loopPair).onChange(of: store.loopPair) { _, _ in
+                            if let seg = store.selectedSeg { Task { await store.select(seg: seg) } }
                         }
-                        Toggle("镜像 Clip", isOn: $store.mirrorClip).onChange(of: store.mirrorClip) { _, _ in
-                            // layer transform updates via PlayerView.updateNSView
-                        }
+                        Toggle("镜像 Clip", isOn: $store.mirrorClip)
                         Picker("音频", selection: $audioSource) {
                             Text("Clip").tag("clip")
                             Text("Movie").tag("movie")
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 160)
-                        .onChange(of: audioSource) { _, _ in
-                            applyAudioSelection()
-                        }
+                        .onChange(of: audioSource) { _, _ in applyAudioSelection() }
                         Spacer()
                         Stepper(value: $maxLoops, in: 1...8) {
                             Text("循环次数: \(maxLoops)")
@@ -99,65 +105,58 @@ struct MainView: View {
                         }
                         .frame(width: 160)
                     }
-                    .padding(.bottom, 4)
 
-                    VStack(spacing: 6) {
-                        Text("Clip").font(.caption).foregroundColor(.secondary)
-                        ZStack {
-                            PlayerView(player: store.pair.clip)
-                                .scaleEffect(x: store.mirrorClip ? -1 : 1, y: 1)
-                            if store.pair.clip.currentItem == nil {
-                                Text("未加载 / 无视频").font(.caption).foregroundColor(.secondary)
+                    // Side-by-side players
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(spacing: 6) {
+                            Text("Clip").font(.caption).foregroundColor(.secondary)
+                            ZStack {
+                                PlayerView(player: store.pair.clip)
+                                    .scaleEffect(x: store.mirrorClip ? -1 : 1, y: 1)
+                                if store.pair.clip.currentItem == nil {
+                                    Text("未加载 / 无视频").font(.caption).foregroundColor(.secondary)
+                                }
                             }
+                            .frame(minHeight: 240)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.black.opacity(0.9))
+                            .clipped()
                         }
-                        .frame(minHeight: 240)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.black.opacity(0.9))
-                        .clipped()
-                    }
-                    VStack(spacing: 6) {
-                        Text("Movie").font(.caption).foregroundColor(.secondary)
-                        ZStack {
-                            PlayerView(player: store.pair.movie)
-                            if store.pair.movie.currentItem == nil {
-                                Text("未加载 / 无视频").font(.caption).foregroundColor(.secondary)
+                        VStack(spacing: 6) {
+                            Text("Movie").font(.caption).foregroundColor(.secondary)
+                            ZStack {
+                                PlayerView(player: store.pair.movie)
+                                if store.pair.movie.currentItem == nil {
+                                    Text("未加载 / 无视频").font(.caption).foregroundColor(.secondary)
+                                }
                             }
+                            .frame(minHeight: 240)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.black.opacity(0.9))
+                            .clipped()
                         }
-                        .frame(minHeight: 240)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.black.opacity(0.9))
-                        .clipped()
                     }
-                    Spacer(minLength: 0)
-                }
-                .frame(minWidth: 480, maxWidth: .infinity)
 
-                // Right: candidates
-                VStack(alignment: .leading) {
+                    // Timeline placeholder (layout only for now)
+                    ZStack {
+                        Rectangle().fill(Color.blue.opacity(0.6)).frame(height: 14).cornerRadius(4)
+                        HStack {
+                            Text("Cur seg").padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Color.yellow).cornerRadius(3)
+                            Spacer()
+                            Text("movie timeline").font(.caption).foregroundColor(.white.opacity(0.9))
+                        }.padding(.horizontal, 6)
+                    }
+
+                    // Header: status & apply
                     HStack {
                         Text("候选（当前段）").font(.headline)
-                        Picker("", selection: $store.candMode) {
-                            Text("Top").tag("top")
-                            Text("场景内").tag("scene")
-                            Text("走廊").tag("corridor")
-                            Text("全部").tag("all")
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: store.candMode) { _, _ in
-                            if let seg = store.selectedSeg {
-                                store.refreshCandidatesForCurrentTab()
-                            }
-                        }
                         Spacer()
-                        // 当前校对状态展示
-                        Group {
-                            if let st = store.selectedSeg?.review_status, !st.isEmpty {
-                                Text("状态：\(st)").font(.caption).foregroundStyle(.secondary)
-                            } else {
-                                Text("状态：-").font(.caption).foregroundStyle(.secondary)
-                            }
+                        if let st = store.selectedSeg?.review_status, !st.isEmpty {
+                            Text("状态：\(st)").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("状态：-").font(.caption).foregroundStyle(.secondary)
                         }
-                        // 校对状态菜单 {"anchor", "matched", "deferred", "rejected"}
                         Menu("校对状态") {
                             Button("OK") { Task { await store.updateReviewStatus("ok") } }
                             Button("Need Trim") { Task { await store.updateReviewStatus("needTrim") } }
@@ -166,20 +165,16 @@ struct MainView: View {
                         }
                         Button("应用所选") { applySelected() }.keyboardShortcut(.return, modifiers: [])
                     }
-                    .padding(.bottom, 6)
 
-                    List(selection: $selectedCandIdx) {
-                        ForEach(Array(store.candidates.enumerated()), id: \.offset) { (i, c) in
-                            CandidateRowView(c: c, isSelected: i == selectedCandIdx)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedCandIdx = i
-                                    previewCandidate(c)
-                                }
-                        }
+                    // 4 horizontal strips: top / scene / corridor / all
+                    HStack(alignment: .top, spacing: 8) {
+                        candColumn(title: "Top", items: bucket("top"))
+                        candColumn(title: "场景内", items: bucket("scene"))
+                        candColumn(title: "走廊", items: bucket("corridor"))
+                        candColumn(title: "全部", items: bucket("all"))
                     }
                 }
-                .frame(minWidth: 360)
+                .frame(minWidth: 720, maxWidth: .infinity)
             }
         }
         .onAppear {
@@ -236,6 +231,133 @@ struct MainView: View {
         }
     }
 
+    // MARK: - Continuity / Island helpers
+    private func isContiguous(_ a: SegmentRow?, _ b: SegmentRow?) -> Bool {
+        guard let am = a?.matched_orig_seg, let bm = b?.matched_orig_seg else { return false }
+
+        // 1) 优先：orig 的 seg_id 连号
+        if let asid = am.seg_id, let bsid = bm.seg_id, bsid == asid + 1 { return true }
+
+        // 2) 兼容：同 scene 且 idx 连号
+        if let ascn = am.scene_id, let bscn = bm.scene_id,
+           let aidx = am.scene_seg_idx, let bidx = bm.scene_seg_idx,
+           ascn == bscn, bidx == aidx + 1 { return true }
+
+        // 3) 跨场景边界但时间相接（prev.end ≈ next.start）
+        let eps = 0.001 // 1ms 容忍
+        if abs(am.end - bm.start) <= eps { return true }
+
+        return false
+    }
+
+    private func annotateSegments(_ rows: [SegmentRow])
+    -> [(row: SegmentRow, fromPrev: Bool, toNext: Bool, islandId: Int, spike: Bool)] {
+        var out: [(SegmentRow, Bool, Bool, Int, Bool)] = []
+        var island = 0
+        for i in rows.indices {
+            let cur = rows[i]
+            let prev = (i > 0) ? rows[i-1] : nil
+            let next = (i + 1 < rows.count) ? rows[i+1] : nil
+
+            let fromPrev = isContiguous(prev, cur)
+            if !fromPrev { island += 1 }
+            let toNext = isContiguous(cur, next)
+
+            // --- spike 计算（单位：秒；阈值转自你给的毫秒规则） ---
+            let spike: Bool = {
+                guard
+                    let pm = prev?.matched_orig_seg,
+                    let cm = cur.matched_orig_seg,
+                    let nm = next?.matched_orig_seg
+                else { return false }
+                // 使用边界判断：prev.end 与 next.start 作为“交界”，当前用中点
+                let prevEnd = pm.end
+                let nextStart = nm.start
+                let cMid = 0.5 * (cm.start + cm.end)
+
+                let dt1 = abs(cMid - prevEnd)
+                let dt2 = abs(nextStart - cMid)
+                let dtCross = abs(nextStart - prevEnd)
+
+                // 附加：若 seg_id 连续，也视为交界相邻
+                let idAdjacent: Bool = {
+                    if let ps = pm.seg_id, let ns = nm.seg_id { return ns == ps + 1 }
+                    return false
+                }()
+
+                let adjacent = (dtCross <= 0.200) || idAdjacent
+                let isSpike = adjacent && (dt1 > 1.000) && (dt2 > 1.000) && (min(dt1, dt2) > 5.0 * dtCross)
+
+                if isSpike {
+                    let f3: (Double) -> String = { String(format: "%.3f", $0) }
+                    print("[Spike] seg #\(cur.seg_id)  prevEnd=\(fmt(prevEnd))  nextStart=\(fmt(nextStart))  cMid=\(fmt(cMid))  dt1=\(f3(dt1))  dt2=\(f3(dt2))  cross=\(f3(dtCross))  idAdjacent=\(idAdjacent)")
+                }
+                return isSpike
+            }()
+
+            out.append((cur, fromPrev, toNext, island, spike))
+        }
+        return out
+    }
+    
+    private func islandColorFor(_ id: Int) -> Color {
+        // Deterministic palette by island id (1-based); repeats every 8 islands
+        let hues: [Double] = [0.03, 0.12, 0.20, 0.33, 0.58, 0.70, 0.80, 0.92]
+        let h = hues[max(0, (id - 1) % hues.count)]
+        return Color(hue: h, saturation: 0.65, brightness: 0.85)
+    }
+
+    private func bucket(_ key: String) -> [Candidate] {
+        guard let segId = store.selectedSeg?.seg_id else { return [] }
+        return store.candBucketsBySeg[segId]?[key] ?? []
+    }
+
+    @ViewBuilder
+    private func candColumn(title: String, items: [Candidate]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline).bold()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { (i, c) in
+                        CandidateRowView(c: c, isSelected: false)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedCand = c
+                                previewCandidate(c)
+                            }
+                        Divider()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+    
+    @ViewBuilder
+    private func candStrip(title: String, items: [Candidate]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline).bold()
+            ScrollView(.horizontal, showsIndicators: true) {
+                LazyHStack(alignment: .top, spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
+                        CandidateRowView(c: c, isSelected: false)
+                            .frame(width: 280)
+                            .padding(6)
+                            .background(Color.gray.opacity(0.08))
+                            .cornerRadius(6)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
+                            .onTapGesture {
+                                selectedCand = c
+                                previewCandidate(c)
+                            }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+
     private func applyAudioSelection() {
         switch audioSource {
         case "movie":
@@ -267,6 +389,10 @@ struct MainView: View {
     }
 
     private func applySelected() {
+        if let cand = selectedCand {
+            Task { await store.applyCurrentCandidate(cand) }
+            return
+        }
         guard selectedCandIdx < store.candidates.count else { return }
         let cand = store.candidates[selectedCandIdx]
         Task { await store.applyCurrentCandidate(cand) }
@@ -277,6 +403,12 @@ struct SegmentRowView: View {
     let row: SegmentRow
     let isSelected: Bool
     let hasOverride: Bool
+    // continuity
+    let fromPrev: Bool
+    let toNext: Bool
+    let islandColor: Color
+    // spike
+    let isSpike: Bool
 
     private var statusColor: Color {
         switch row.review_status {
@@ -289,36 +421,91 @@ struct SegmentRowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("#\(row.seg_id)  S\(row.clip.scene_id ?? -1)/idx \(row.clip.scene_seg_idx ?? -1)")
-                    .fontWeight(isSelected ? .bold : .regular)
-                if hasOverride { Text("✓").foregroundColor(.blue) }
-                let st = (row.review_status?.isEmpty == false) ? row.review_status! : "-"
-                Group {
-                    if row.review_status?.isEmpty == false {
-                        Circle().fill(statusColor).frame(width: 8, height: 8)
-                    } else {
-                        Circle().stroke(.secondary, lineWidth: 1).frame(width: 8, height: 8)
+        HStack(alignment: .top, spacing: 8) {
+            ContinuityPip(color: islandColor, fromPrev: fromPrev, toNext: toNext)
+                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("#\(row.seg_id)  S\(row.clip.scene_id ?? -1)/idx \(row.clip.scene_seg_idx ?? -1)")
+                        .fontWeight(isSelected ? .bold : .regular)
+                    if hasOverride { Text("✓").foregroundColor(.blue) }
+                    if isSpike {
+                        Text("⚡︎")
+                            .foregroundColor(.pink)
+                            .padding(.horizontal, 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.pink.opacity(0.6), lineWidth: 1)
+                            )
                     }
-                    Text(st).font(.caption2).foregroundStyle(.secondary)
+                    let st = (row.review_status?.isEmpty == false) ? row.review_status! : "-"
+                    Group {
+                        if row.review_status?.isEmpty == false {
+                            Circle().fill(statusColor).frame(width: 8, height: 8)
+                        } else {
+                            Circle().stroke(.secondary, lineWidth: 1).frame(width: 8, height: 8)
+                        }
+                        Text(st).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let mo = row.matched_orig_seg {
+                        Text("seg \(mo.seg_id ?? -1) S\(mo.scene_id ?? -1)/idx \(mo.scene_seg_idx ?? -1)")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("-").foregroundStyle(.secondary)
+                    }
                 }
-                Spacer()
+                Text("clip: \(fmt(row.clip.start)) – \(fmt(row.clip.end))").font(.caption).foregroundStyle(.secondary)
                 if let mo = row.matched_orig_seg {
-                    Text("seg \(mo.seg_id ?? -1) S\(mo.scene_id ?? -1)/idx \(mo.scene_seg_idx ?? -1)")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("-").foregroundStyle(.secondary)
+                    Text("movie: \(fmt(mo.start)) – \(fmt(mo.end))").font(.caption).foregroundStyle(.secondary)
                 }
-            }
-            Text("clip: \(fmt(row.clip.start)) – \(fmt(row.clip.end))").font(.caption).foregroundStyle(.secondary)
-            if let mo = row.matched_orig_seg {
-                Text("movie: \(fmt(mo.start)) – \(fmt(mo.end))").font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .background(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSpike ? Color.red : Color.clear, lineWidth: isSpike ? 2 : 0)
+        )
+    }
+}
+
+struct ContinuityPip: View {
+    let color: Color
+    let fromPrev: Bool
+    let toNext: Bool
+    var body: some View {
+        GeometryReader { g in
+            let lineW: CGFloat = 3
+            let dotR: CGFloat = 4
+            let midY = g.size.height / 2
+            let x = (g.size.width - lineW) / 2
+
+            Path { p in
+                // 上半段：顶 -> 圆点上缘
+                if fromPrev {
+                    p.addRect(CGRect(x: x,
+                                     y: 0,
+                                     width: lineW,
+                                     height: max(0, midY - dotR)))
+                }
+                // 圆点
+                p.addEllipse(in: CGRect(x: (g.size.width - dotR*2)/2,
+                                        y: midY - dotR,
+                                        width: dotR*2,
+                                        height: dotR*2))
+                // 下半段：圆点下缘 -> 底
+                if toNext {
+                    p.addRect(CGRect(x: x,
+                                     y: midY + dotR,
+                                     width: lineW,
+                                     height: max(0, g.size.height - (midY + dotR))))
+                }
+            }
+            .fill(color)
+        }
+        .frame(width: 12) // 左侧占位宽
     }
 }
 

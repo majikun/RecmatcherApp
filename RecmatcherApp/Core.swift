@@ -28,7 +28,7 @@ struct Candidate: Codable, Identifiable {
     let scene_seg_idx: Int?
     let start: Double
     let end: Double
-    let scene_id: Int
+    let scene_id: Int?
     let score: Double?
     let faiss_id: Int?
     let movie_id: String?
@@ -38,7 +38,7 @@ struct Candidate: Codable, Identifiable {
         if let sid = seg_id { return sid }
         // Fallback id if seg_id is missing (use scene info + ms timestamp)
         let ms = Int((start * 1000).rounded())
-        let a = (scene_id & 0xFFFF) << 8
+        let a = (scene_id ?? 0 & 0xFFFF) << 8
         let b = (scene_seg_idx ?? 0) & 0xFF
         return (a | b) ^ ms
     }
