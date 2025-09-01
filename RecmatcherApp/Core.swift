@@ -168,6 +168,33 @@ extension APIClient {
     func corridor(segId: Int, span: Int = 2) async throws -> CorridorResp {
         try await get("/candidates/corridor", query: ["seg_id": "\(segId)", "span": "\(span)"])
     }
+    
+    // === Candidates summary (one call for all tabs) ===
+    func candidateBuckets(segId: Int, span: Int = 2, k: Int = 120, offset: Int = 0) async throws -> [String: [Candidate]] {
+        struct Page: Decodable { let total: Int?; let items: [Candidate]? }
+        struct Corr: Decodable { let span: Int?; let prev: [Candidate]?; let next: [Candidate]?; let current: [Candidate]? }
+        struct Neighborhood: Decodable { let span: Int?; let items: [Candidate]? }
+        struct Summary: Decodable { let ok: Bool?; let seg_id: Int?; let top: Page?; let scene: Page?; let all: Page?; let corridor: Corr?; let neighborhood: Neighborhood? }
+        let summary: Summary = try await get("/candidates/summary", query: [
+            "seg_id": String(segId),
+            "span": String(span),
+            "k": String(k),
+            "offset": String(offset)
+        ])
+        var buckets: [String: [Candidate]] = [:]
+        buckets["top"] = summary.top?.items ?? []
+        // “场景内”Tab 应显示锚点 ± span 的邻域（5 个场景），对应后端的 neighborhood.items
+        buckets["scene"] = summary.neighborhood?.items ?? []
+        // 如需保留“仅同一 scene 过滤”的结果，可在需要时读取：summary.scene?.items（未用于当前 UI）
+        buckets["all"] = summary.all?.items ?? []
+        // corridor: 合并 prev + current + next（main.py 已加 source 字段：corridor_prev/next/current）
+        var corr = [Candidate]()
+        if let p = summary.corridor?.prev { corr.append(contentsOf: p) }
+        if let c = summary.corridor?.current { corr.append(contentsOf: c) }
+        if let n = summary.corridor?.next { corr.append(contentsOf: n) }
+        buckets["corridor"] = corr
+        return buckets
+    }
 }
 
 // === API Client ===
@@ -289,6 +316,8 @@ final class AppStore: ObservableObject {
 
     // Security-scope handler for bookmarks
     private let scope = SecurityScope()
+    // Cache: seg_id -> { tabKey: [Candidate] }
+    var candBucketsBySeg: [Int: [String: [Candidate]]] = [:]
 
     init() {
         // Restore movie bookmark if available
@@ -382,8 +411,8 @@ final class AppStore: ObservableObject {
         let movieStart = mo?.start ?? 0
         let movieEnd   = mo?.end ?? (movieStart + (clipEnd-clipStart))
         pair.playPair(clipStart: clipStart, clipEnd: clipEnd, movieStart: movieStart, movieEnd: movieEnd, togetherLoop: loopPair, mirrorClip: mirrorClip, clipURL: clipURL(), movieURL: movieURL())
-        // load candidates
-        await onCandModeChanged()
+        // load candidates via summary (one call + cache)
+        await loadCandidates(for: seg)
     }
 
     func clipURL() -> URL? {
@@ -395,46 +424,48 @@ final class AppStore: ObservableObject {
         return nil
     }
 
-
     func loadCandidates(for seg: SegmentRow) async {
+        let segId = seg.seg_id
+        // 1) 命中缓存：不打网，直接切桶
+        if let buckets = candBucketsBySeg[segId] {
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                self.candidates = buckets[self.candMode] ?? []
+            }
+            return
+        }
+        // 2) 未命中：一次性拉 summary 并缓存
         do {
-            let r = try await api.candidates(segId: seg.seg_id, mode: candMode, k: 120, offset: 0)
-            self.candidates = r.items
+            let buckets = try await api.candidateBuckets(segId: segId)
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                self.candBucketsBySeg[segId] = buckets
+                self.candidates = buckets[self.candMode] ?? []
+            }
         } catch {
-            print("[store] candidates error:", error)
-            self.candidates = []
+            print("[store] candidates summary error:", error)
+            await MainActor.run { [weak self] in self?.candidates = [] }
         }
     }
 
     func onCandModeChanged() async {
         guard let seg = selectedSeg else { return }
-        do {
-            switch candMode {
-            case "scene":
-                let r = try await api.sceneNeighborhood(segId: seg.seg_id, span: 2)
-                self.sceneOrigSegments = r.items
-                self.candidates = []
-                self.corridorPrev = []
-                self.corridorNext = []
-            case "corridor":
-                let r = try await api.corridor(segId: seg.seg_id, span: 2)
-                self.corridorPrev = r.prev
-                self.corridorNext = r.next
-                self.sceneOrigSegments = []
-                self.candidates = []
-            default:
-                let r = try await api.candidates(segId: seg.seg_id, mode: candMode, k: 120, offset: 0)
-                self.candidates = r.items
-                self.sceneOrigSegments = []
-                self.corridorPrev = []
-                self.corridorNext = []
-            }
-        } catch {
-            print("[store] onCandModeChanged error:", error)
-            self.candidates = []
+        // 如果当前分段已有缓存，直接切换本地桶；否则拉一次 summary 并缓存
+        if let buckets = candBucketsBySeg[seg.seg_id] {
+            self.candidates = buckets[self.candMode] ?? []
+            // 旧字段清空，避免 UI 残留
             self.sceneOrigSegments = []
             self.corridorPrev = []
             self.corridorNext = []
+            return
+        }
+        await loadCandidates(for: seg)
+    }
+    
+    func refreshCandidatesForCurrentTab() {
+        guard let segId = selectedSeg?.seg_id else { return }
+        if let buckets = candBucketsBySeg[segId] {
+            self.candidates = buckets[self.candMode] ?? []
         }
     }
 
@@ -451,6 +482,7 @@ final class AppStore: ObservableObject {
                 selectedSeg = row
             }
             try await refreshOverrides()
+            candBucketsBySeg.removeValue(forKey: seg.seg_id)
             // preview again with applied range
             _ = await select(seg: selectedSeg!)
         } catch {

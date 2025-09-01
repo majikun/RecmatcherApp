@@ -140,7 +140,7 @@ struct MainView: View {
                         .pickerStyle(.segmented)
                         .onChange(of: store.candMode) { _, _ in
                             if let seg = store.selectedSeg {
-                                Task { await store.loadCandidates(for: seg) }
+                                store.refreshCandidatesForCurrentTab()
                             }
                         }
                         Spacer()
