@@ -250,6 +250,16 @@ struct MainView: View {
             }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
             Button("导出") { Task { await store.exportMerged() } }
+            // Keyboard shortcuts: ← / → to switch segments
+            Button("") { selectPrevSegment() }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .frame(width: 0, height: 0)
+                .opacity(0.001)
+            Button("") { selectNextSegment() }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .frame(width: 0, height: 0)
+                .opacity(0.001)
+            
             Spacer()
             if !store.moviePath.isEmpty {
                 Text(URL(fileURLWithPath: store.moviePath).lastPathComponent)
@@ -327,12 +337,19 @@ struct MainView: View {
                     return false
                 }()
 
-                let adjacent = (dtCross <= 0.200) || idAdjacent
-                let isSpike = adjacent && (dt1 > 1.000) && (dt2 > 1.000) && (min(dt1, dt2) > 5.0 * dtCross)
+                // 放宽“交界接近”的判定：
+                // 1) 绝对阈值：dtCross <= 6s 认为 prev/next 仍然属于同一时间邻域；
+                // 2) 或者相对阈值：当前与两侧都远离，且相对 dtCross 的比值很大（>=20），也视作尖刺场景；
+                let crossLimit = 6.0
+                let ratioGate = 20.0
+                let ratio = min(dt1, dt2) / max(dtCross, 0.001)
+                let adjacentLike = (dtCross <= crossLimit) || (ratio >= ratioGate) || idAdjacent
+
+                let isSpike = adjacentLike && (dt1 > 1.000) && (dt2 > 1.000) && (min(dt1, dt2) > 5.0 * dtCross)
 
                 if isSpike {
                     let f3: (Double) -> String = { String(format: "%.3f", $0) }
-                    print("[Spike] seg #\(cur.seg_id)  prevEnd=\(fmt(prevEnd))  nextStart=\(fmt(nextStart))  cMid=\(fmt(cMid))  dt1=\(f3(dt1))  dt2=\(f3(dt2))  cross=\(f3(dtCross))  idAdjacent=\(idAdjacent)")
+                    print("[Spike] seg #\(cur.seg_id)  prevEnd=\(fmt(prevEnd))  nextStart=\(fmt(nextStart))  cMid=\(fmt(cMid))  dt1=\(f3(dt1))  dt2=\(f3(dt2))  cross=\(f3(dtCross))  ratio=\(f3(ratio))  idAdj=\(idAdjacent)  crossLimit=\(f3(crossLimit))")
                 }
                 return isSpike
             }()
@@ -370,12 +387,14 @@ struct MainView: View {
                     ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
                         CandidateRowView(c: c,
                                          isSelected: sameCandidate(selectedCand, c),
-                                         isBound: isBoundCandidate(c))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedCand = c
-                                previewCandidate(c)
-                            }
+                                         isBound: isBoundCandidate(c),
+                                         onClick: {
+                                             selectedCand = c
+                                             previewCandidate(c)
+                                         },
+                                         onDoubleClick: {
+                                             applyCandidate(c)
+                                         })
                         Divider()
                     }
                 }
@@ -422,6 +441,27 @@ struct MainView: View {
         guard selectedCandIdx < store.candidates.count else { return }
         let cand = store.candidates[selectedCandIdx]
         Task { await store.applyCurrentCandidate(cand) }
+    }
+    
+    private func applyCandidate(_ cand: Candidate) {
+        selectedCand = cand
+        Task { await store.applyCurrentCandidate(cand) }
+    }
+
+    private func selectPrevSegment() {
+        guard let current = store.selectedSeg?.seg_id,
+              let idx = store.allSegments.firstIndex(where: { $0.seg_id == current }),
+              idx > 0 else { return }
+        let prev = store.allSegments[idx - 1]
+        Task { await store.select(seg: prev) }
+    }
+
+    private func selectNextSegment() {
+        guard let current = store.selectedSeg?.seg_id,
+              let idx = store.allSegments.firstIndex(where: { $0.seg_id == current }),
+              idx + 1 < store.allSegments.count else { return }
+        let next = store.allSegments[idx + 1]
+        Task { await store.select(seg: next) }
     }
     
     private func sameCandidate(_ a: Candidate?, _ b: Candidate) -> Bool {
@@ -570,6 +610,8 @@ struct CandidateRowView: View {
     let c: Candidate
     let isSelected: Bool
     let isBound: Bool
+    var onClick: () -> Void = {}
+    var onDoubleClick: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -590,6 +632,9 @@ struct CandidateRowView: View {
                     lineWidth: (isSelected || isBound) ? 2 : 0
                 )
         )
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { onDoubleClick() }   // 双击 = 应用所选
+        .onTapGesture { onClick() }                  // 单击 = 选中 + 预览
     }
 }
 
