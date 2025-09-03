@@ -4,7 +4,7 @@ import AVFoundation
 import AppKit
 
 // === Config ===
-let BACKEND_BASE = URL(string: "http://127.0.0.1:8787")!
+let BACKEND_BASE = URL(string: "http://localhost:8080/api/recmatcher")!
 
 // Optional: You can set default local file paths here to test without opening a project first.
 let DEFAULT_MOVIE_PATH: String? = nil
@@ -265,12 +265,14 @@ actor APIClient {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    // API: open project
-    struct OpenProjectBody: Encodable { let root: String; let movie: String?; let clip: String? }
-    struct OpenProjectResp: Decodable { let ok: Bool; let root: String?; let movie: String?; let clip: String? }
-    func openProject(root: String, movie: String?, clip: String?) async throws -> OpenProjectResp {
-        let resp: OpenProjectResp = try await post("/project/open", body: OpenProjectBody(root: root, movie: movie, clip: clip))
-        print("[api] /project/open resp ok=\(resp.ok) root=\(resp.root ?? "-") movie=\(resp.movie ?? "-") clip=\(resp.clip ?? "-")")
+    // API: open project (task-based)
+    struct OpenProjectBody: Encodable { let task_id: String }
+    struct OpenProjectResp: Decodable { let ok: Bool; let movie: String?; let clip: String?; let paths: [String:String]? }
+    func openProject(taskId: String) async throws -> OpenProjectResp {
+        let resp: OpenProjectResp = try await post("/project/open", body: OpenProjectBody(task_id: taskId))
+        let mv = resp.movie ?? resp.paths?["movie"] ?? "-"
+        let cp = resp.clip  ?? resp.paths?["clip"]  ?? "-"
+        print("[api] /project/open resp ok=\(resp.ok) movie=\(mv) clip=\(cp)")
         return resp
     }
 
@@ -392,13 +394,13 @@ final class AppStore: ObservableObject {
 
     func openProject() async {
         do {
-            let resp = try await api.openProject(root: projectRoot,
-                                                 movie: moviePath.isEmpty ? nil : moviePath,
-                                                 clip: clipPath.isEmpty ? nil : clipPath)
-            // Backfill paths if backend provides them
-            if let mv = resp.movie, !mv.isEmpty { self.moviePath = mv }
-            if let cp = resp.clip, !cp.isEmpty { self.clipPath = cp }
-            print("[store] openProject filled movie=\(self.moviePath) clip=\(self.clipPath)")
+            // 临时复用 projectRoot 字段来承载 taskId；UI 将在后续改为独立输入
+            let taskId = projectRoot
+            let resp = try await api.openProject(taskId: taskId)
+            // Backfill paths from backend response (movie/clip or paths.movie/paths.clip)
+            if let mv = (resp.movie ?? resp.paths?["movie"]), !mv.isEmpty { self.moviePath = mv }
+            if let cp = (resp.clip  ?? resp.paths?["clip"]),  !cp.isEmpty { self.clipPath  = cp }
+            print("[store] openProject(taskId: \(taskId)) filled movie=\(self.moviePath) clip=\(self.clipPath)")
             await loadEverythingAfterOpen()
         } catch {
             print("[store] openProject error:", error)

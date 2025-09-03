@@ -215,18 +215,9 @@ struct MainView: View {
     private var toolbar: some View {
         HStack(spacing: 8) {
             HStack(spacing: 6) {
-                TextField("project root", text: $store.projectRoot)
+                TextField("task_id", text: $store.projectRoot) // 暂用 projectRoot 承载 taskId
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 340)
-                Button("选择项目…") {
-                    pickLocalDirectory("选择项目根目录…") { url in
-                        store.projectRoot = url.path
-                        Task {
-                            await store.openProject()            // 仅传 project.root，由后端返回 clip/movie
-                            await store.loadEverythingAfterOpen() // 回填文本框并加载视频
-                        }
-                    }
-                }
+                    .frame(width: 360)
             }
             TextField("movie.mp4 (local path, optional)", text: $store.moviePath)
                 .textFieldStyle(.roundedBorder)
@@ -244,8 +235,7 @@ struct MainView: View {
             }
             Button("打开") {
                 Task {
-                    await store.openProject()            // 仅使用 project.root；由后端返回 clip/movie
-                    await store.loadEverythingAfterOpen() // 回填并加载
+                    await store.openProject()            
                 }
             }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
