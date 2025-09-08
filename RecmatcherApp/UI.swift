@@ -32,6 +32,8 @@ struct MainView: View {
     @State private var maxLoops: Int = 3 // kept for parity; AVFoundation loops continuously
     @State private var audioSource: String = "clip" // "clip" or "movie"
     @State private var selectedCand: Candidate? = nil
+    @State private var activeCandBucket: String? = nil
+    @State private var isApplyingCandidate: Bool = false
 
     // Pick a local file and pass its URL back
     private func pickLocalFile(_ title: String = "选择文件…", _ onPick: (URL) -> Void) {
@@ -198,10 +200,10 @@ struct MainView: View {
 
                     // 4 horizontal strips: top / scene / corridor / all
                     HStack(alignment: .top, spacing: 8) {
-                        candColumn(title: "Top", items: bucket("top"))
-                        candColumn(title: "场景内", items: bucket("scene"))
-                        candColumn(title: "走廊", items: bucket("corridor"))
-                        candColumn(title: "全部", items: bucket("all"))
+                        candColumn(bucketKey: "top", title: "Top", items: bucket("top"))
+                        candColumn(bucketKey: "scene", title: "场景内", items: bucket("scene"))
+                        candColumn(bucketKey: "corridor", title: "走廊", items: bucket("corridor"))
+                        candColumn(bucketKey: "all", title: "全部", items: bucket("all"))
                     }
                 }
                 .frame(minWidth: 720, maxWidth: .infinity)
@@ -217,10 +219,12 @@ struct MainView: View {
         }
         .onChange(of: store.selectedSeg?.seg_id ?? -1) { _, _ in
             selectedCand = nil
+            activeCandBucket = nil
         }
         .onChange(of: store.selectedSeg?.matched_orig_seg?.seg_id ?? -1) { _, _ in
             // 应用覆盖后，清理蓝色选中；橙色绑定会根据新的 matched 重新计算
             selectedCand = nil
+            isApplyingCandidate = false
         }
         .padding(8)
     }
@@ -252,7 +256,7 @@ struct MainView: View {
             }
             Button("打开") {
                 Task {
-                    await store.openProject()            
+                    await store.openProject()
                 }
             }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
@@ -266,7 +270,14 @@ struct MainView: View {
                 .keyboardShortcut(.rightArrow, modifiers: [])
                 .frame(width: 0, height: 0)
                 .opacity(0.001)
-            
+            Button("") { moveCandSelection(delta: -1) }
+                .keyboardShortcut(.upArrow, modifiers: [])
+                .frame(width: 0, height: 0)
+                .opacity(0.001)
+            Button("") { moveCandSelection(delta: 1) }
+                .keyboardShortcut(.downArrow, modifiers: [])
+                .frame(width: 0, height: 0)
+                .opacity(0.001)
             Spacer()
             if !store.moviePath.isEmpty {
                 Text(URL(fileURLWithPath: store.moviePath).lastPathComponent)
@@ -381,7 +392,7 @@ struct MainView: View {
     }
 
     @ViewBuilder
-    private func candColumn(title: String, items: [Candidate]) -> some View {
+    private func candColumn(bucketKey: String, title: String, items: [Candidate]) -> some View {
         let hasSel = items.contains { sameCandidate(selectedCand, $0) }
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -398,10 +409,12 @@ struct MainView: View {
                                              isSelected: sameCandidate(selectedCand, c),
                                              isBound: isBoundCandidate(c),
                                              onClick: {
+                                                 activeCandBucket = bucketKey
                                                  selectedCand = c
                                                  previewCandidate(c)
                                              },
                                              onDoubleClick: {
+                                                 activeCandBucket = bucketKey
                                                  applyCandidate(c)
                                              })
                             .id(rowId)
@@ -409,19 +422,22 @@ struct MainView: View {
                         }
                     }
                 }
-                // Initial and reactive auto-scrolls
-                .onAppear { scrollToCurrent(in: items, proxy: proxy) }
+                // Initial and reactive auto-scrolls (bucket-aware)
+                .onAppear { scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey) }
                 .onChange(of: selectedCand?.seg_id ?? -1) { _, _ in
-                    scrollToCurrent(in: items, proxy: proxy)
+                    scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey)
                 }
                 .onChange(of: store.selectedSeg?.seg_id ?? -1) { _, _ in
-                    scrollToCurrent(in: items, proxy: proxy)
+                    scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey)
                 }
                 .onChange(of: store.selectedSeg?.matched_orig_seg?.seg_id ?? -1) { _, _ in
-                    scrollToCurrent(in: items, proxy: proxy)
+                    scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey)
                 }
                 .onChange(of: items.count) { _, _ in
-                    scrollToCurrent(in: items, proxy: proxy)
+                    scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey)
+                }
+                .onChange(of: activeCandBucket ?? "") { _, _ in
+                    scrollToCurrent(in: items, proxy: proxy, bucketKey: bucketKey)
                 }
             }
         }
@@ -460,17 +476,40 @@ struct MainView: View {
 
     private func applySelected() {
         if let cand = selectedCand {
+            isApplyingCandidate = true
             Task { await store.applyCurrentCandidate(cand) }
             return
         }
         guard selectedCandIdx < store.candidates.count else { return }
         let cand = store.candidates[selectedCandIdx]
+        isApplyingCandidate = true
+        Task { await store.applyCurrentCandidate(cand) }
+    }
+
+    private func applyCandidate(_ cand: Candidate) {
+        selectedCand = cand
+        isApplyingCandidate = true
         Task { await store.applyCurrentCandidate(cand) }
     }
     
-    private func applyCandidate(_ cand: Candidate) {
-        selectedCand = cand
-        Task { await store.applyCurrentCandidate(cand) }
+    private func moveCandSelection(delta: Int) {
+        guard let key = activeCandBucket else { return }
+        let items = bucket(key)
+        guard !items.isEmpty else { return }
+
+        if let sel = selectedCand,
+           let cur = items.firstIndex(where: { sameCandidate(sel, $0) }) {
+            let next = max(0, min(items.count - 1, cur + delta))
+            let target = items[next]
+            selectedCand = target
+            previewCandidate(target) // 选中后驱动播放
+        } else {
+            // 当前列还没有选中的项：根据方向选择首/尾
+            let idx = (delta > 0) ? 0 : (items.count - 1)
+            let target = items[idx]
+            selectedCand = target
+            previewCandidate(target)
+        }
     }
 
     private func selectPrevSegment() {
@@ -527,9 +566,13 @@ struct MainView: View {
         return "t:\(Int(c.start * 1000))-\(Int(c.end * 1000))"
     }
 
-    // Determine preferred scroll target: selected (blue) first, else bound (orange)
-    private func scrollTargetId(in items: [Candidate]) -> String? {
-        if let sel = selectedCand, let idx = items.firstIndex(where: { sameCandidate(sel, $0) }) {
+    // Determine preferred scroll target with anti-competition logic:
+    // - Only the ACTIVE bucket follows the blue selection when not applying
+    // - Otherwise, fall back to bound (orange)
+    private func scrollTargetId(in items: [Candidate], bucketKey: String) -> String? {
+        if activeCandBucket == bucketKey, !isApplyingCandidate,
+           let sel = selectedCand,
+           let idx = items.firstIndex(where: { sameCandidate(sel, $0) }) {
             return candidateKey(items[idx])
         }
         if let idx = items.firstIndex(where: { isBoundCandidate($0) }) {
@@ -538,8 +581,8 @@ struct MainView: View {
         return nil
     }
 
-    private func scrollToCurrent(in items: [Candidate], proxy: ScrollViewProxy) {
-        guard let target = scrollTargetId(in: items) else { return }
+    private func scrollToCurrent(in items: [Candidate], proxy: ScrollViewProxy, bucketKey: String) {
+        guard let target = scrollTargetId(in: items, bucketKey: bucketKey) else { return }
         withAnimation { proxy.scrollTo(target, anchor: .center) }
     }
 }
