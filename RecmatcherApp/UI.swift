@@ -65,30 +65,47 @@ struct MainView: View {
             toolbar
             Divider()
             HSplitView {
-                // Left: segments
+                // Left: segments (auto-scroll to keep selection visible)
                 VStack(alignment: .leading) {
                     Text("段落列表").font(.headline).padding(.bottom, 6)
                     // Annotate segments with continuity info for left list
                     let annotated = annotateSegments(store.allSegments)
-                    List {
-                        ForEach(annotated, id: \.row.seg_id) { item in
-                            let s = item.row
-                            SegmentRowView(
-                                row: s,
-                                isSelected: store.selectedSeg?.seg_id == s.seg_id,
-                                hasOverride: s.is_override == true,
-                                fromPrev: item.fromPrev,
-                                toNext: item.toNext,
-                                islandColor: item.spike ? .pink : islandColorFor(item.islandId),
-                                isSpike: item.spike
-                            )
-                            .contentShape(Rectangle())
-                            .onTapGesture { Task { await store.select(seg: s) } }
+
+                    ScrollViewReader { proxy in
+                        List {
+                            ForEach(annotated, id: \.row.seg_id) { item in
+                                let s = item.row
+                                SegmentRowView(
+                                    row: s,
+                                    isSelected: store.selectedSeg?.seg_id == s.seg_id,
+                                    hasOverride: s.is_override == true,
+                                    fromPrev: item.fromPrev,
+                                    toNext: item.toNext,
+                                    islandColor: item.spike ? .pink : islandColorFor(item.islandId),
+                                    isSpike: item.spike
+                                )
+                                .contentShape(Rectangle())
+                                .id(s.seg_id) // needed for programmatic scrolling
+                                .onTapGesture { Task { await store.select(seg: s) } }
+                            }
+                        }
+                        .listStyle(.plain)
+                        .listRowSeparator(.hidden)
+                        .scrollContentBackground(.hidden)
+                        // Auto-scroll whenever selection changes (e.g., via ←/→ shortcuts)
+                        .onChange(of: store.selectedSeg?.seg_id ?? -1) { _, _ in
+                            guard let id = store.selectedSeg?.seg_id else { return }
+                            withAnimation { proxy.scrollTo(id, anchor: .center) }
+                        }
+                        // Ensure initial selection is visible when view appears
+                        .onAppear {
+                            if let id = store.selectedSeg?.seg_id {
+                                DispatchQueue.main.async {
+                                    proxy.scrollTo(id, anchor: .center)
+                                }
+                            }
                         }
                     }
-                    .listStyle(.plain)
-                    .listRowSeparator(.hidden)
-                    .scrollContentBackground(.hidden)
                 }
                 .frame(minWidth: 280, maxWidth: 350)
 
@@ -372,21 +389,39 @@ struct MainView: View {
                     .foregroundColor(hasSel ? .blue : .primary)
                 if hasSel { Circle().fill(Color.blue).frame(width: 6, height: 6) }
             }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
-                        CandidateRowView(c: c,
-                                         isSelected: sameCandidate(selectedCand, c),
-                                         isBound: isBoundCandidate(c),
-                                         onClick: {
-                                             selectedCand = c
-                                             previewCandidate(c)
-                                         },
-                                         onDoubleClick: {
-                                             applyCandidate(c)
-                                         })
-                        Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { (_, c) in
+                            let rowId = candidateKey(c)
+                            CandidateRowView(c: c,
+                                             isSelected: sameCandidate(selectedCand, c),
+                                             isBound: isBoundCandidate(c),
+                                             onClick: {
+                                                 selectedCand = c
+                                                 previewCandidate(c)
+                                             },
+                                             onDoubleClick: {
+                                                 applyCandidate(c)
+                                             })
+                            .id(rowId)
+                            Divider()
+                        }
                     }
+                }
+                // Initial and reactive auto-scrolls
+                .onAppear { scrollToCurrent(in: items, proxy: proxy) }
+                .onChange(of: selectedCand?.seg_id ?? -1) { _, _ in
+                    scrollToCurrent(in: items, proxy: proxy)
+                }
+                .onChange(of: store.selectedSeg?.seg_id ?? -1) { _, _ in
+                    scrollToCurrent(in: items, proxy: proxy)
+                }
+                .onChange(of: store.selectedSeg?.matched_orig_seg?.seg_id ?? -1) { _, _ in
+                    scrollToCurrent(in: items, proxy: proxy)
+                }
+                .onChange(of: items.count) { _, _ in
+                    scrollToCurrent(in: items, proxy: proxy)
                 }
             }
         }
@@ -483,6 +518,29 @@ struct MainView: View {
         // 兜底：时间段一致（小容差）
         let eps = 0.010 // 10ms 容忍
         return abs(m.start - c.start) <= eps && abs(m.end - c.end) <= eps
+    }
+
+    // Stable key for programmatic scrolling within candidate lists
+    private func candidateKey(_ c: Candidate) -> String {
+        if let sid = c.seg_id { return "seg:\(sid)" }
+        // Fallback to time window millisecond resolution
+        return "t:\(Int(c.start * 1000))-\(Int(c.end * 1000))"
+    }
+
+    // Determine preferred scroll target: selected (blue) first, else bound (orange)
+    private func scrollTargetId(in items: [Candidate]) -> String? {
+        if let sel = selectedCand, let idx = items.firstIndex(where: { sameCandidate(sel, $0) }) {
+            return candidateKey(items[idx])
+        }
+        if let idx = items.firstIndex(where: { isBoundCandidate($0) }) {
+            return candidateKey(items[idx])
+        }
+        return nil
+    }
+
+    private func scrollToCurrent(in items: [Candidate], proxy: ScrollViewProxy) {
+        guard let target = scrollTargetId(in: items) else { return }
+        withAnimation { proxy.scrollTo(target, anchor: .center) }
     }
 }
 
