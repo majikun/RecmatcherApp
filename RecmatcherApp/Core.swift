@@ -206,6 +206,14 @@ actor APIClient {
         print("[api] /export -> ok=\(resp.ok) path=\(resp.path ?? "-") backup=\(resp.backup ?? "-") count=\(resp.count ?? -1)")
         return resp
     }
+    struct ManualReviewCompleteBody: Encodable { let task_id: String }
+    struct ManualReviewCompleteResp: Decodable { let ok: Bool?; let message: String? }
+    func manualReviewComplete(taskId: String) async throws -> ManualReviewCompleteResp {
+        let body = ManualReviewCompleteBody(task_id: taskId)
+        let resp: ManualReviewCompleteResp = try await post("/manual_review/complete", body: body)
+        print("[api] /manual_review/complete -> ok=\(resp.ok ?? false) message=\(resp.message ?? "-")")
+        return resp
+    }
     // API: review state
     struct UpdateReviewBody: Encodable { let seg_id: Int; let status: String }
     func updateReviewStatus(segId: Int, status: String) async throws {
@@ -374,6 +382,13 @@ final class AppStore: ObservableObject {
 
     func loadEverythingAfterOpen() async {
         do {
+            let prevSegId = selectedSeg?.seg_id
+            candBucketsBySeg.removeAll()
+            candidates = []
+            sceneOrigSegments = []
+            corridorPrev = []
+            corridorNext = []
+            selectedSeg = nil
             self.scenes = try await api.listScenes()
             // Flatten segments from all scenes (limit first N if necessary)
             var flat: [SegmentRow] = []
@@ -382,8 +397,14 @@ final class AppStore: ObservableObject {
                 flat.append(contentsOf: segs)
             }
             self.allSegments = flat
-            if let first = flat.first {
-                await select(seg: first)
+            let nextSelection: SegmentRow? = {
+                if let prev = prevSegId {
+                    return flat.first(where: { $0.seg_id == prev })
+                }
+                return flat.first
+            }()
+            if let seg = nextSelection {
+                await select(seg: seg)
             }
             try await refreshOverrides()
             await refreshReviewStates()
@@ -423,6 +444,10 @@ final class AppStore: ObservableObject {
                 return r
             }
             return row
+        }
+        if let cur = selectedSeg,
+           let updated = self.allSegments.first(where: { $0.seg_id == cur.seg_id }) {
+            selectedSeg = updated
         }
     }
     
@@ -602,6 +627,40 @@ final class AppStore: ObservableObject {
             }
         }
     }
+
+    func completeManualReview() async {
+        let taskId = projectRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !taskId.isEmpty else {
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "无法完成"
+                alert.informativeText = "请先填写 task_id 后再执行完成操作。"
+                alert.runModal()
+            }
+            return
+        }
+        do {
+            let resp = try await api.manualReviewComplete(taskId: taskId)
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                let ok = resp.ok ?? false
+                alert.messageText = ok ? "已标记完成" : "完成失败"
+                var info = "任务 ID: \(taskId)"
+                if let msg = resp.message, !msg.isEmpty {
+                    info += "\n\n\(msg)"
+                }
+                alert.informativeText = info
+                alert.runModal()
+            }
+        } catch {
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "完成失败"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
 }
 
 // === AnyEncodable helper ===
@@ -724,4 +783,3 @@ final class PairPlayer {
         }
     }
 }
-

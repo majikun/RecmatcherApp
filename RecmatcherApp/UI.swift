@@ -261,6 +261,7 @@ struct MainView: View {
             }
             Button("刷新场景") { Task { await store.loadEverythingAfterOpen() } }
             Button("导出") { Task { await store.exportMerged() } }
+            Button("完成") { Task { await store.completeManualReview() } }
             // Keyboard shortcuts: ← / → to switch segments
             Button("") { selectPrevSegment() }
                 .keyboardShortcut(.leftArrow, modifiers: [])
