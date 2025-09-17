@@ -240,19 +240,13 @@ struct MainView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 360)
             }
-            TextField("movie.mp4 (local path, optional)", text: $store.moviePath)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 320)
-            TextField("clip.mp4 (local path, optional)", text: $store.clipPath)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 320)
-            Button("授权Movie…") {
-                store.authorizeMovieFile()
-                Task { await store.openProject() }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Movie 路径").font(.footnote).foregroundStyle(.secondary)
+                pathLabel(store.moviePath)
             }
-            Button("授权Clip…") {
-                store.authorizeClipFile()
-                Task { await store.openProject() }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Clip 路径").font(.footnote).foregroundStyle(.secondary)
+                pathLabel(store.clipPath)
             }
             Button("打开") {
                 Task {
@@ -290,6 +284,31 @@ struct MainView: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private func pathLabel(_ text: String) -> some View {
+        let display = text.isEmpty ? "-" : text
+        return Text(display)
+            .font(.caption)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .frame(width: 320, alignment: .leading)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: NSColor.textBackgroundColor))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+            )
+            .onTapGesture { copyToClipboard(display) }
+    }
+
+    private func copyToClipboard(_ text: String) {
+        guard !text.isEmpty, text != "-" else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func togglePlayPause() {

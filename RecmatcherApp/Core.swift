@@ -389,6 +389,10 @@ final class AppStore: ObservableObject {
             corridorPrev = []
             corridorNext = []
             selectedSeg = nil
+            overridesMap = [:]
+            scenes = []
+            allSegments = []
+            pair.reset()
             self.scenes = try await api.listScenes()
             // Flatten segments from all scenes (limit first N if necessary)
             var flat: [SegmentRow] = []
@@ -781,5 +785,27 @@ final class PairPlayer {
                 // No restarts left — stop naturally
             }
         }
+    }
+
+    func reset() {
+        clip.pause()
+        movie.pause()
+        if let b = clipBoundary {
+            clip.removeTimeObserver(b)
+            clipBoundary = nil
+        }
+        if let b = movieBoundary {
+            movie.removeTimeObserver(b)
+            movieBoundary = nil
+        }
+        clip.replaceCurrentItem(with: nil)
+        movie.replaceCurrentItem(with: nil)
+        clipRange = (0, 0)
+        movieRange = (0, 0)
+        togetherLoop = true
+        mirrorClip = false
+        clipFinished = false
+        movieFinished = false
+        restartsRemaining = 0
     }
 }
